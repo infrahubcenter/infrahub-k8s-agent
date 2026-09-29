@@ -1,0 +1,6 @@
+*.exe
+*.exe~
+.env*
+*.log
+.git
+k8s-agent

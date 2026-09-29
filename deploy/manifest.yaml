@@ -1,0 +1,155 @@
+# InfraHub Kubernetes agent -- install this once inside the cluster you
+# want InfraHub to monitor.
+#
+# 1. In InfraHub, go to Kubernetes Clusters and click "Connect Cluster".
+#    It gives you a one-time agent token (shown once, like a GitHub PAT)
+#    and the backend URL to use.
+# 2. Create the agent's Secret with your real values -- deliberately NOT
+#    defined in this file, so a later `kubectl apply -f manifest.yaml`
+#    (e.g. to pick up an RBAC/image update) can never overwrite it with a
+#    stale or placeholder value:
+#      kubectl create namespace infrahub-agent
+#      kubectl create secret generic infrahub-k8s-agent -n infrahub-agent \
+#        --from-literal=backend-url=<the wss://... URL InfraHub showed you> \
+#        --from-literal=agent-token=<the token InfraHub showed you>
+#    Testing against a *local* cluster (Docker Desktop Kubernetes, minikube,
+#    kind) with the backend running on your own machine: `localhost` in
+#    that URL means "this pod," not your machine -- use
+#    `host.docker.internal` (Docker Desktop Kubernetes) or your cluster
+#    tool's own host-alias instead, e.g.
+#    ws://host.docker.internal:8080/api/k8s/agent/connect.
+# 3. kubectl apply -f manifest.yaml
+#
+# The agent only ever dials OUT to InfraHub; nothing needs to be exposed
+# or opened on this cluster for it to work. Its ServiceAccount is granted
+# read-only (get/list/watch) access to pods, pods/log, nodes, namespaces,
+# deployments/statefulsets/daemonsets/replicasets, jobs/cronjobs, services,
+# persistentvolumeclaims/persistentvolumes/storageclasses,
+# ingresses/networkpolicies, endpointslices, resourcequotas/limitranges,
+# poddisruptionbudgets, and horizontalpodautoscalers -- plus read access to
+# pod/node metrics if metrics-server is installed, and nodes/proxy (used
+# only to read the kubelet's own stats/summary for per-node storage
+# usage). It deliberately has NO access to Secrets, ConfigMaps, or any
+# RBAC object (ServiceAccounts/Roles/RoleBindings/ClusterRoles/
+# ClusterRoleBindings) -- so a compromised or curious InfraHub deployment
+# can never enumerate a cluster's secret material or privilege-escalation
+# surface through this agent, even just names. Nothing here can create,
+# modify, or delete any cluster resource.
+#
+# IMPORTANT if you already have this agent installed: the rules below
+# were expanded (Jobs/CronJobs/ReplicaSets/PVs/StorageClasses/Ingresses/
+# NetworkPolicies/EndpointSlices/ResourceQuotas/LimitRanges/PDBs/HPAs are
+# new) to support more resource kinds in InfraHub's Kubernetes Monitoring
+# dashboard. Re-run `kubectl apply -f manifest.yaml` to pick up the new
+# RBAC -- the Deployment's `imagePullPolicy: Always` on a floating
+# `:latest` tag means the agent itself also re-pulls automatically, but
+# the ClusterRole/ClusterRoleBinding only update when this manifest is
+# re-applied.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infrahub-agent
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: infrahub-k8s-agent
+  namespace: infrahub-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infrahub-k8s-agent
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "nodes", "namespaces", "services", "persistentvolumeclaims", "persistentvolumes", "resourcequotas", "limitranges"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infrahub-k8s-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infrahub-k8s-agent
+subjects:
+  - kind: ServiceAccount
+    name: infrahub-k8s-agent
+    namespace: infrahub-agent
+---
+# The infrahub-k8s-agent Secret itself is intentionally NOT defined here --
+# create it yourself (see the instructions at the top of this file) so
+# applying this manifest again never clobbers your real backend-url/
+# agent-token with a stale value.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infrahub-k8s-agent
+  namespace: infrahub-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: infrahub-k8s-agent
+  template:
+    metadata:
+      labels:
+        app: infrahub-k8s-agent
+    spec:
+      serviceAccountName: infrahub-k8s-agent
+      containers:
+        - name: agent
+          # Published image, built from k8s-agent/Dockerfile
+          # (linux/amd64 + linux/arm64). To build/push your own instead:
+          # docker buildx build --platform linux/amd64,linux/arm64 \
+          #   -t <your-registry>/k8s-agent:<tag> --push . (from k8s-agent/).
+          # Pinned release tag (docker.io/infrahubcenter). Always keeps
+          # nodes in step if a tag is ever re-pushed.
+          image: docker.io/infrahubcenter/infrahub-k8s-agent:1.0.0
+          imagePullPolicy: Always
+          env:
+            - name: INFRAHUB_BACKEND_URL
+              valueFrom:
+                secretKeyRef:
+                  name: infrahub-k8s-agent
+                  key: backend-url
+            - name: INFRAHUB_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: infrahub-k8s-agent
+                  key: agent-token
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

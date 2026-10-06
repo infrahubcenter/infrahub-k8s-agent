@@ -21,6 +21,10 @@ const (
 	CmdStopStream             CommandType = "stop_stream"
 	CmdListNodes              CommandType = "list_nodes"
 	CmdClusterResourceSummary CommandType = "cluster_resource_summary"
+	// CmdPodHealth returns every pod's problems (waiting/termination
+	// reasons, failed conditions, recent Warning events) -- what the
+	// backend's log-dashboard alerts evaluate every cycle.
+	CmdPodHealth CommandType = "pod_health"
 )
 
 // Command is one backend -> agent message.
@@ -30,6 +34,11 @@ type Command struct {
 	Namespace string      `json:"namespace,omitempty"`
 	PodName   string      `json:"pod_name,omitempty"`
 	Since     string      `json:"since,omitempty"`
+	// Previous (fetch_logs_since) reads the previous, crashed instance's
+	// logs instead of the running one; TailLines limits it to the last N
+	// lines. Agents older than these fields ignore them.
+	Previous  bool  `json:"previous,omitempty"`
+	TailLines int64 `json:"tail_lines,omitempty"`
 }
 
 // MessageType enumerates every message this agent can send back.
@@ -63,6 +72,40 @@ type PodInfo struct {
 	CPUMillicores   *int64 `json:"cpu_millicores,omitempty"`
 	MemoryBytes     *int64 `json:"memory_bytes,omitempty"`
 	StartedAt       string `json:"started_at,omitempty"`
+}
+
+// PodProblem is one thing wrong with a pod, as Kubernetes itself reports
+// it. Source is where it came from: "waiting" (a container stuck, e.g.
+// ImagePullBackOff), "terminated" (the current container stopped with an
+// error), "last_terminated" (the previous instance stopped -- a restart),
+// "condition" (PodScheduled=False, e.g. Unschedulable) or "event" (a
+// Warning event such as FailedMount, BackOff, Unhealthy).
+type PodProblem struct {
+	Container string `json:"container,omitempty"`
+	Source    string `json:"source"`
+	Reason    string `json:"reason"`
+	Message   string `json:"message,omitempty"`
+	ExitCode  *int32 `json:"exit_code,omitempty"`
+	At        string `json:"at,omitempty"`
+	Count     int32  `json:"count,omitempty"`
+}
+
+// PodHealth is one pod in the "pod_health" result.
+type PodHealth struct {
+	Namespace    string       `json:"namespace"`
+	PodName      string       `json:"pod_name"`
+	NodeName     string       `json:"node_name,omitempty"`
+	Phase        string       `json:"phase"`
+	RestartCount int32        `json:"restart_count"`
+	Problems     []PodProblem `json:"problems,omitempty"`
+}
+
+// PodHealthResult is what "pod_health" returns. EventsError is set when
+// Warning events couldn't be read (an install whose ClusterRole predates
+// the "events" rule) -- the pod list itself is still complete.
+type PodHealthResult struct {
+	Pods        []PodHealth `json:"pods"`
+	EventsError string      `json:"events_error,omitempty"`
 }
 
 // ServerVersionResult is what "server_version" returns.

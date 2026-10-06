@@ -30,8 +30,9 @@ read-only (get/list/watch) access to a broad set of resource kinds --
 pods, pods/log, nodes, namespaces, deployments/statefulsets/daemonsets/
 replicasets, jobs/cronjobs, services, persistentvolumeclaims/
 persistentvolumes/storageclasses, ingresses/networkpolicies,
-endpointslices, resourcequotas/limitranges, poddisruptionbudgets, and
-horizontalpodautoscalers -- plus read access to pod/node metrics if
+endpointslices, resourcequotas/limitranges, poddisruptionbudgets,
+horizontalpodautoscalers and events (Warning events such as FailedMount or
+BackOff, for Log Explorer pod-problem alerts) -- plus read access to pod/node metrics if
 metrics-server is installed. See `deploy/manifest.yaml`'s own header
 comment for the exact, current RBAC rules (kept accurate there, not
 duplicated here to avoid drift). It deliberately has no access to
@@ -40,7 +41,9 @@ create, modify, or delete any cluster resource.
 
 If you already have an older version of this agent installed, re-run
 `kubectl apply -f manifest.yaml` after an update to pick up any RBAC
-changes -- see the manifest's own "IMPORTANT" note for details.
+changes -- see the manifest's own "IMPORTANT" note for details. Without the
+"events" rule, pod-problem alerts still see waiting reasons, crashes and
+restarts, but not Warning events.
 
 ## Building your own image
 

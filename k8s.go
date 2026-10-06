@@ -25,7 +25,7 @@ import (
 )
 
 type k8sClient struct {
-	clientset *kubernetes.Clientset
+	clientset kubernetes.Interface
 	// metrics is nil when metrics-server isn't installed or reachable --
 	// every caller treats that as "no metrics available" (nil CPU/Memory
 	// fields), never a fatal error.
@@ -128,8 +128,11 @@ func (c *k8sClient) ListPods(ctx context.Context, namespace string) ([]PodInfo, 
 // (the zero time means "from the beginning of the container's current log
 // buffer"). Every line is timestamped, matching the backend's expected
 // `<RFC3339Nano> <text>` capture format exactly.
-func (c *k8sClient) FetchLogsSince(ctx context.Context, namespace, podName string, since time.Time) (string, error) {
-	opts := &corev1.PodLogOptions{Timestamps: true}
+func (c *k8sClient) FetchLogsSince(ctx context.Context, namespace, podName string, since time.Time, previous bool, tailLines int64) (string, error) {
+	opts := &corev1.PodLogOptions{Timestamps: true, Previous: previous}
+	if tailLines > 0 {
+		opts.TailLines = &tailLines
+	}
 	if !since.IsZero() {
 		t := metav1.NewTime(since)
 		opts.SinceTime = &t
@@ -144,6 +147,94 @@ func (c *k8sClient) FetchLogsSince(ctx context.Context, namespace, podName strin
 		return "", err
 	}
 	return string(data), nil
+}
+
+// maxProblemMessage keeps one problem's message short -- enough to show
+// why (e.g. "pull access denied for x, repository does not exist").
+const maxProblemMessage = 400
+
+func shortMessage(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > maxProblemMessage {
+		return s[:maxProblemMessage] + "..."
+	}
+	return s
+}
+
+// PodHealth answers the "pod_health" command: every pod's current
+// problems, plus Warning events seen at or after since. Events need the
+// "events" permission (deploy/manifest.yaml); without it the pods are
+// still returned and EventsError says why events are missing.
+func (c *k8sClient) PodHealth(ctx context.Context, since time.Time) (PodHealthResult, error) {
+	pods, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return PodHealthResult{}, err
+	}
+	result := PodHealthResult{Pods: make([]PodHealth, 0, len(pods.Items))}
+	index := map[string]int{}
+	for _, pod := range pods.Items {
+		h := PodHealth{Namespace: pod.Namespace, PodName: pod.Name, NodeName: pod.Spec.NodeName, Phase: string(pod.Status.Phase)}
+		statuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+		for _, cs := range statuses {
+			h.RestartCount += cs.RestartCount
+			if w := cs.State.Waiting; w != nil && w.Reason != "" && w.Reason != "ContainerCreating" && w.Reason != "PodInitializing" {
+				h.Problems = append(h.Problems, PodProblem{Container: cs.Name, Source: "waiting", Reason: w.Reason, Message: shortMessage(w.Message)})
+			}
+			if t := cs.State.Terminated; t != nil && (t.ExitCode != 0 || t.Reason == "OOMKilled") {
+				code := t.ExitCode
+				h.Problems = append(h.Problems, PodProblem{Container: cs.Name, Source: "terminated", Reason: t.Reason, Message: shortMessage(t.Message), ExitCode: &code, At: rfc3339(t.FinishedAt)})
+			}
+			if t := cs.LastTerminationState.Terminated; t != nil {
+				code := t.ExitCode
+				h.Problems = append(h.Problems, PodProblem{Container: cs.Name, Source: "last_terminated", Reason: t.Reason, Message: shortMessage(t.Message), ExitCode: &code, At: rfc3339(t.FinishedAt)})
+			}
+		}
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse && cond.Reason != "" {
+				h.Problems = append(h.Problems, PodProblem{Source: "condition", Reason: cond.Reason, Message: shortMessage(cond.Message), At: rfc3339(cond.LastTransitionTime)})
+			}
+		}
+		index[pod.Namespace+"/"+pod.Name] = len(result.Pods)
+		result.Pods = append(result.Pods, h)
+	}
+
+	events, err := c.clientset.CoreV1().Events("").List(ctx, metav1.ListOptions{FieldSelector: "type=Warning,involvedObject.kind=Pod"})
+	if err != nil {
+		result.EventsError = err.Error()
+		log.Printf("pod_health: Warning events unavailable (re-apply deploy/manifest.yaml to grant events): %v", err)
+		return result, nil
+	}
+	for _, ev := range events.Items {
+		at := ev.LastTimestamp.Time
+		if at.IsZero() {
+			at = ev.EventTime.Time
+		}
+		if at.IsZero() {
+			at = ev.CreationTimestamp.Time
+		}
+		if !since.IsZero() && at.Before(since) {
+			continue
+		}
+		i, ok := index[ev.InvolvedObject.Namespace+"/"+ev.InvolvedObject.Name]
+		if !ok {
+			continue // pod already gone
+		}
+		count := ev.Count
+		if count == 0 && ev.Series != nil {
+			count = ev.Series.Count
+		}
+		result.Pods[i].Problems = append(result.Pods[i].Problems, PodProblem{
+			Source: "event", Reason: ev.Reason, Message: shortMessage(ev.Message), At: at.UTC().Format(time.RFC3339), Count: count,
+		})
+	}
+	return result, nil
+}
+
+func rfc3339(t metav1.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Time.UTC().Format(time.RFC3339)
 }
 
 // ListNodes answers the "list_nodes" command -- every node's capacity/

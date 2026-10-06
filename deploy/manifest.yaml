@@ -38,8 +38,9 @@
 #
 # IMPORTANT if you already have this agent installed: the rules below
 # were expanded (Jobs/CronJobs/ReplicaSets/PVs/StorageClasses/Ingresses/
-# NetworkPolicies/EndpointSlices/ResourceQuotas/LimitRanges/PDBs/HPAs are
-# new) to support more resource kinds in InfraHub's Kubernetes Monitoring
+# NetworkPolicies/EndpointSlices/ResourceQuotas/LimitRanges/PDBs/HPAs, and
+# most recently Events for Log Explorer pod-problem alerts, are new) to
+# support more resource kinds in InfraHub's Kubernetes Monitoring
 # dashboard. Re-run `kubectl apply -f manifest.yaml` to pick up the new
 # RBAC -- the Deployment's `imagePullPolicy: Always` on a floating
 # `:latest` tag means the agent itself also re-pulls automatically, but
@@ -67,6 +68,11 @@ rules:
   - apiGroups: [""]
     resources: ["nodes/proxy"]
     verbs: ["get"]
+  # Warning events (FailedMount, BackOff, Unhealthy, FailedScheduling...)
+  # for log-dashboard alerts.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
     verbs: ["get", "list", "watch"]

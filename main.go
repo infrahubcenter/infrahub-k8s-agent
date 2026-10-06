@@ -198,12 +198,23 @@ func handleCommand(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mute
 		}
 		sendResult(conn, writeMu, cmd.ID, summary, err)
 
+	case CmdPodHealth:
+		var since time.Time
+		if cmd.Since != "" {
+			since, _ = time.Parse(time.RFC3339Nano, cmd.Since)
+		}
+		health, err := k8s.PodHealth(ctx, since)
+		if err != nil {
+			log.Printf("pod_health failed: %v", err)
+		}
+		sendResult(conn, writeMu, cmd.ID, health, err)
+
 	case CmdFetchLogsSince:
 		var since time.Time
 		if cmd.Since != "" {
 			since, _ = time.Parse(time.RFC3339Nano, cmd.Since)
 		}
-		output, err := k8s.FetchLogsSince(ctx, cmd.Namespace, cmd.PodName, since)
+		output, err := k8s.FetchLogsSince(ctx, cmd.Namespace, cmd.PodName, since, cmd.Previous, cmd.TailLines)
 		if err != nil {
 			log.Printf("fetch_logs_since failed for pod %s/%s: %v", cmd.Namespace, cmd.PodName, err)
 		} else {
